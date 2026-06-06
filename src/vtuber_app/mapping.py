@@ -1,154 +1,123 @@
 import numpy as np
 import cv2
 from scipy.spatial.transform import Rotation as R
-from typing import Dict, Any, List
+from typing import Dict, Any, Optional
+
 
 class BlendshapeMapper:
-    def __init__(self):
-        # Indices for EAR calculation
-        self.LEFT_EYE = [33, 160, 158, 133, 153, 144]
-        self.RIGHT_EYE = [362, 385, 387, 263, 373, 380]
-        self.MOUTH = [13, 14, 78, 308] # Inner lips and corners
-        
-    def calculate_ear(self, landmarks, eye_indices):
-        # Vertical distances
-        v1 = np.linalg.norm(np.array([landmarks[eye_indices[1]].x, landmarks[eye_indices[1]].y]) - 
-                            np.array([landmarks[eye_indices[5]].x, landmarks[eye_indices[5]].y]))
-        v2 = np.linalg.norm(np.array([landmarks[eye_indices[2]].x, landmarks[eye_indices[2]].y]) - 
-                            np.array([landmarks[eye_indices[4]].x, landmarks[eye_indices[4]].y]))
-        # Horizontal distance
-        h = np.linalg.norm(np.array([landmarks[eye_indices[0]].x, landmarks[eye_indices[0]].y]) - 
-                           np.array([landmarks[eye_indices[3]].x, landmarks[eye_indices[3]].y]))
-        ear = (v1 + v2) / (2.0 * h)
-        return ear
+    LEFT_EYE  = [33, 160, 158, 133, 153, 144]
+    RIGHT_EYE = [362, 385, 387, 263, 373, 380]
 
-    def map_face(self, face_landmarks) -> Dict[str, float]:
-        if not face_landmarks:
-            return {}
-            
-        landmarks = face_landmarks.landmark
-        
-        # Blinks
-        left_ear = self.calculate_ear(landmarks, self.LEFT_EYE)
-        right_ear = self.calculate_ear(landmarks, self.RIGHT_EYE)
-        
-        # Simple thresholding/scaling for blink weight (0.2 is roughly closed)
-        eyeBlinkLeft = np.clip(1.0 - (left_ear - 0.15) / (0.3 - 0.15), 0, 1)
-        eyeBlinkRight = np.clip(1.0 - (right_ear - 0.15) / (0.3 - 0.15), 0, 1)
-        
-        # Mouth open (jawOpen)
-        upper_lip = np.array([landmarks[13].x, landmarks[13].y])
-        lower_lip = np.array([landmarks[14].x, landmarks[14].y])
-        mouth_open = np.linalg.norm(upper_lip - lower_lip)
-        jawOpen = np.clip(mouth_open * 10, 0, 1) # Scaling factor
-        
-        return {
-            "eyeBlinkLeft": float(eyeBlinkLeft),
-            "eyeBlinkRight": float(eyeBlinkRight),
-            "jawOpen": float(jawOpen)
-        }
+    def _ear(self, lms, idx):
+        def pt(i): return np.array([lms[i].x, lms[i].y], dtype=np.float64)
+        v1 = np.linalg.norm(pt(idx[1]) - pt(idx[5]))
+        v2 = np.linalg.norm(pt(idx[2]) - pt(idx[4]))
+        h  = np.linalg.norm(pt(idx[0]) - pt(idx[3]))
+        return (v1 + v2) / (2.0 * h + 1e-6)
 
-    def estimate_head_pose(self, face_landmarks, img_w, img_h):
-        # 3D model points (simplified)
-        model_points = np.array([
-            (0.0, 0.0, 0.0),             # Nose tip
-            (0.0, -330.0, -65.0),        # Chin
-            (-225.0, 170.0, -135.0),     # Left eye left corner
-            (225.0, 170.0, -135.0),      # Right eye right corner
-            (-150.0, -150.0, -125.0),    # Left Mouth corner
-            (150.0, -150.0, -125.0)      # Right mouth corner
-        ])
+    def map_face(self, face_landmarks_list) -> Dict[str, float]:
+        if not face_landmarks_list:
+            return {"eyeBlinkLeft": 0.0, "eyeBlinkRight": 0.0, "jawOpen": 0.0}
 
-        # 2D image points from landmarks
-        landmarks = face_landmarks.landmark
-        image_points = np.array([
-            (landmarks[1].x * img_w, landmarks[1].y * img_h),     # Nose tip
-            (landmarks[152].x * img_w, landmarks[152].y * img_h), # Chin
-            (landmarks[33].x * img_w, landmarks[33].y * img_h),   # Left eye left corner
-            (landmarks[263].x * img_w, landmarks[263].y * img_h), # Right eye right corner
-            (landmarks[61].x * img_w, landmarks[61].y * img_h),   # Left Mouth corner
-            (landmarks[291].x * img_w, landmarks[291].y * img_h)  # Right mouth corner
-        ], dtype="double")
+        lms = face_landmarks_list[0]
 
-        focal_length = img_w
-        center = (img_w / 2, img_h / 2)
-        camera_matrix = np.array([
-            [focal_length, 0, center[0]],
-            [0, focal_length, center[1]],
-            [0, 0, 1]
-        ], dtype="double")
+        left_ear  = self._ear(lms, self.LEFT_EYE)
+        right_ear = self._ear(lms, self.RIGHT_EYE)
 
-        dist_coeffs = np.zeros((4, 1)) # Assuming no lens distortion
-        (success, rotation_vector, translation_vector) = cv2.solvePnP(
-            model_points, image_points, camera_matrix, dist_coeffs, flags=cv2.SOLVEPNP_ITERATIVE
-        )
-        
-        if success:
-            r = R.from_rotvec(rotation_vector.flatten())
-            return r.as_quat()
-        return [0, 0, 0, 1]
+        blink_l = float(np.clip(1.0 - (left_ear  - 0.15) / 0.15, 0.0, 1.0))
+        blink_r = float(np.clip(1.0 - (right_ear - 0.15) / 0.15, 0.0, 1.0))
+
+        upper = np.array([lms[13].x, lms[13].y], dtype=np.float64)
+        lower = np.array([lms[14].x, lms[14].y], dtype=np.float64)
+        jaw   = float(np.clip(np.linalg.norm(upper - lower) * 10.0, 0.0, 1.0))
+
+        return {"eyeBlinkLeft": blink_l, "eyeBlinkRight": blink_r, "jawOpen": jaw}
+
+    def estimate_head_pose(self, face_landmarks_list, img_w, img_h):
+        if not face_landmarks_list:
+            return [0.0, 0.0, 0.0, 1.0]
+        lms = face_landmarks_list[0]
+
+        model_pts = np.array([
+            (0.0,    0.0,    0.0),
+            (0.0,  -330.0, -65.0),
+            (-225.0, 170.0,-135.0),
+            ( 225.0, 170.0,-135.0),
+            (-150.0,-150.0,-125.0),
+            ( 150.0,-150.0,-125.0),
+        ], dtype=np.float64)
+
+        img_pts = np.array([
+            (lms[1].x   * img_w, lms[1].y   * img_h),
+            (lms[152].x * img_w, lms[152].y * img_h),
+            (lms[33].x  * img_w, lms[33].y  * img_h),
+            (lms[263].x * img_w, lms[263].y * img_h),
+            (lms[61].x  * img_w, lms[61].y  * img_h),
+            (lms[291].x * img_w, lms[291].y * img_h),
+        ], dtype=np.float64)
+
+        focal = float(img_w)
+        cam   = np.array([[focal, 0, img_w/2],
+                          [0, focal, img_h/2],
+                          [0, 0, 1]], dtype=np.float64)
+        ok, rvec, _ = cv2.solvePnP(model_pts, img_pts, cam, np.zeros((4,1)),
+                                   flags=cv2.SOLVEPNP_ITERATIVE)
+        if ok:
+            return R.from_rotvec(rvec.flatten()).as_quat().tolist()
+        return [0.0, 0.0, 0.0, 1.0]
+
 
 class BoneMapper:
-    def __init__(self):
-        pass
+    def _vec(self, p1, p2) -> np.ndarray:
+        return np.array([p2.x - p1.x, p2.y - p1.y, p2.z - p1.z], dtype=np.float64)
 
-    def get_vector(self, p1, p2):
-        return np.array([p2.x - p1.x, p2.y - p1.y, p2.z - p1.z])
+    def _v2q(self, target, source=(0.0, -1.0, 0.0)):
+        # explicit float64 dtype fixes the numpy casting error
+        t = np.array(target, dtype=np.float64)
+        s = np.array(source, dtype=np.float64)
 
-    def map_pose(self, pose_landmarks) -> Dict[str, Any]:
-        if not pose_landmarks:
+        tn = np.linalg.norm(t)
+        sn = np.linalg.norm(s)
+        if tn < 1e-9 or sn < 1e-9:
+            return [0.0, 0.0, 0.0, 1.0]
+
+        t /= tn
+        s /= sn
+
+        ax = np.cross(s, t)
+        ax_norm = np.linalg.norm(ax)
+        if ax_norm < 1e-6:
+            return [0.0, 0.0, 0.0, 1.0]
+
+        ax /= ax_norm
+        angle = np.arccos(np.clip(np.dot(s, t), -1.0, 1.0))
+        return R.from_rotvec(ax * angle).as_quat().tolist()
+
+    def map_pose(self, pose_landmarks_list) -> Dict[str, Any]:
+        if not pose_landmarks_list:
             return {}
-            
-        # Landmark indices
-        # L_SHOULDER = 11, R_SHOULDER = 12
-        # L_ELBOW = 13, R_ELBOW = 14
-        # L_WRIST = 15, R_WRIST = 16
-        # L_HIP = 23, R_HIP = 24
-        
-        landmarks = pose_landmarks
-        
-        rotations = {}
-        
-        # Left Upper Arm
-        v_l_arm = self.get_vector(landmarks[11], landmarks[13])
-        rotations["leftUpperArm"] = self.vector_to_quat(v_l_arm, [0, -1, 0]) # Assuming default bone is down
-        
-        # Right Upper Arm
-        v_r_arm = self.get_vector(landmarks[12], landmarks[14])
-        rotations["rightUpperArm"] = self.vector_to_quat(v_r_arm, [0, -1, 0])
-        
-        # Spine lean (shoulders relative to hips)
-        shoulder_mid = np.array([
-            (landmarks[11].x + landmarks[12].x) / 2,
-            (landmarks[11].y + landmarks[12].y) / 2,
-            (landmarks[11].z + landmarks[12].z) / 2
-        ])
-        hip_mid = np.array([
-            (landmarks[23].x + landmarks[24].x) / 2,
-            (landmarks[23].y + landmarks[24].y) / 2,
-            (landmarks[23].z + landmarks[24].z) / 2
-        ])
-        v_spine = shoulder_mid - hip_mid
-        rotations["spine"] = self.vector_to_quat(v_spine, [0, 1, 0])
-        
-        return rotations
 
-    def vector_to_quat(self, target_v, source_v=[0, 1, 0]):
-        # Normalize vectors
-        target_v = target_v / np.linalg.norm(target_v)
-        source_v = np.array(source_v) / np.linalg.norm(source_v)
-        
-        # Cross product to find axis of rotation
-        axis = np.cross(source_v, target_v)
-        axis_norm = np.linalg.norm(axis)
-        
-        if axis_norm < 1e-6:
-            return [0, 0, 0, 1]
-            
-        axis = axis / axis_norm
-        
-        # Dot product to find angle
-        angle = np.arccos(np.clip(np.dot(source_v, target_v), -1.0, 1.0))
-        
-        r = R.from_rotvec(axis * angle)
-        return r.as_quat()
+        lms = pose_landmarks_list[0]
+        if len(lms) < 25:
+            return {}
+
+        rots = {}
+
+        # Only map bones where both landmarks are visible enough
+        def vis(i): return getattr(lms[i], 'visibility', 1.0) > 0.4
+
+        if vis(11) and vis(13):
+            rots["leftUpperArm"]  = self._v2q(self._vec(lms[11], lms[13]))
+        if vis(12) and vis(14):
+            rots["rightUpperArm"] = self._v2q(self._vec(lms[12], lms[14]))
+
+        if vis(11) and vis(12) and vis(23) and vis(24):
+            sh_mid = np.array([(lms[11].x+lms[12].x)/2,
+                               (lms[11].y+lms[12].y)/2,
+                               (lms[11].z+lms[12].z)/2], dtype=np.float64)
+            hp_mid = np.array([(lms[23].x+lms[24].x)/2,
+                               (lms[23].y+lms[24].y)/2,
+                               (lms[23].z+lms[24].z)/2], dtype=np.float64)
+            rots["spine"] = self._v2q(sh_mid - hp_mid, (0.0, 1.0, 0.0))
+
+        return rots

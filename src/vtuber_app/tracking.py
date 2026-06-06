@@ -10,13 +10,11 @@ import threading
 import queue
 import time
 from dataclasses import dataclass
-from typing import Optional, List, Any
+from typing import Optional, Any
 
 MODEL_DIR = os.path.join(os.path.dirname(__file__), "models")
-
 FACE_MODEL_URL = "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/latest/face_landmarker.task"
 POSE_MODEL_URL = "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/latest/pose_landmarker_lite.task"
-
 FACE_MODEL_PATH = os.path.join(MODEL_DIR, "face_landmarker.task")
 POSE_MODEL_PATH = os.path.join(MODEL_DIR, "pose_landmarker.task")
 
@@ -34,10 +32,10 @@ def download_model(url, path):
 
 @dataclass
 class TrackingResult:
-    face_landmarks: Any = None
-    pose_landmarks: Any = None
-    blendshapes: Any = None
-    timestamp: float = 0.0
+    face_landmarks: Any = None  # list of landmarks (new API: already unwrapped to face[0])
+    pose_landmarks: Any = None  # list of landmarks (new API: already unwrapped to pose[0])
+    blendshapes:    Any = None
+    timestamp:    float = 0.0
 
 
 class TrackingEngine(threading.Thread):
@@ -47,11 +45,9 @@ class TrackingEngine(threading.Thread):
         self.output_queue = queue.Queue(maxsize=2)
         self.running = False
 
-        # Download models if needed
         download_model(FACE_MODEL_URL, FACE_MODEL_PATH)
         download_model(POSE_MODEL_URL, POSE_MODEL_PATH)
 
-        # Initialize landmarkers
         try:
             face_options = FaceLandmarkerOptions(
                 base_options=mp_python.BaseOptions(model_asset_path=FACE_MODEL_PATH),
@@ -76,37 +72,50 @@ class TrackingEngine(threading.Thread):
         self.running = True
         while self.running:
             try:
-                frame = self.frame_queue.get(timeout=1.0)
+                item = self.frame_queue.get(timeout=1.0)
             except queue.Empty:
                 continue
 
-            if frame is None:
+            if item is None:
                 continue
 
-            t_ms = int(time.time() * 1000)
-            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
+            # capture.py sends (frame, ts) tuples — unpack safely
+            if isinstance(item, tuple):
+                frame, t_ms = item
+            else:
+                frame = item
+                t_ms = int(time.time() * 1000)
 
-            result = TrackingResult(timestamp=time.time())
-
-            if self.face_landmarker:
-                face_res = self.face_landmarker.detect_for_video(mp_image, t_ms)
-                if face_res.face_landmarks:
-                    result.face_landmarks = face_res.face_landmarks[0]
-                if face_res.face_blendshapes:
-                    result.blendshapes = face_res.face_blendshapes[0]
-
-            if self.pose_landmarker:
-                pose_res = self.pose_landmarker.detect_for_video(mp_image, t_ms)
-                if pose_res.pose_landmarks:
-                    result.pose_landmarks = pose_res.pose_landmarks[0]
+            if frame is None or not isinstance(frame, np.ndarray):
+                continue
 
             try:
-                if self.output_queue.full():
-                    self.output_queue.get_nowait()
-                self.output_queue.put_nowait(result)
-            except queue.Full:
-                pass
+                rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
+
+                result = TrackingResult(timestamp=time.time())
+
+                if self.face_landmarker:
+                    face_res = self.face_landmarker.detect_for_video(mp_image, t_ms)
+                    # new API returns lists — store the whole list so mapping.py
+                    # can index [0] itself (consistent with how mapping expects it)
+                    result.face_landmarks = face_res.face_landmarks  # full list
+                    result.blendshapes    = face_res.face_blendshapes
+
+                if self.pose_landmarker:
+                    pose_res = self.pose_landmarker.detect_for_video(mp_image, t_ms)
+                    result.pose_landmarks = pose_res.pose_landmarks  # full list
+
+                try:
+                    if self.output_queue.full():
+                        self.output_queue.get_nowait()
+                    self.output_queue.put_nowait(result)
+                except queue.Full:
+                    pass
+
+            except Exception as e:
+                print(f"[Tracking] Frame error: {e}")
+                import traceback; traceback.print_exc()
 
     def stop(self):
         self.running = False
