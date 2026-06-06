@@ -50,6 +50,12 @@ def draw_hud(frame, blendshapes, fps):
     cv2.putText(frame, f"FPS: {fps:.1f}", (10, y),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255,255,255), 1, cv2.LINE_AA)
     y += 24
+    cv2.putText(frame, "Press 'O' to load VRM model", (10, y),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1, cv2.LINE_AA)
+    y += 24
+    cv2.putText(frame, "Press 'C' to calibrate neutral pose", (10, y),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1, cv2.LINE_AA)
+    y += 24
     for key, val in blendshapes.items():
         bar_w = int(val * 120)
         cv2.rectangle(frame, (10, y), (10 + bar_w, y+10), (0,200,100), -1)
@@ -90,7 +96,41 @@ class VTuberApp:
         print(f"[App] FBX import queued: {path}")
 
     def _calibrate(self):
-        print("[App] Calibrating neutral pose")
+        if self._latest_result:
+            print("[App] Calibrating neutral pose...")
+            self.bone_mapper.set_neutral(self._latest_result.pose_landmarks)
+        else:
+            print("[App] Calibration failed: No tracking result yet")
+
+    def _open_vrm_dialog(self):
+        import subprocess
+        import platform
+
+        if platform.system() == "Darwin":
+            # Native macOS file dialog via osascript to avoid Tkinter/NSApplication conflicts
+            # Restrict to vrm and glb/gltf files
+            cmd = """
+            osascript -e 'POSIX path of (choose file of type {"public.item"} with prompt "Select VRM, GLB or GLTF Model")'
+            """
+            try:
+                path = subprocess.check_output(cmd, shell=True).decode("utf-8").strip()
+                if path:
+                    self._load_vrm(path)
+            except subprocess.CalledProcessError:
+                pass # User cancelled
+        else:
+            # Fallback for other OSs
+            import tkinter as tk
+            from tkinter import filedialog
+            root = tk.Tk()
+            root.withdraw()
+            path = filedialog.askopenfilename(
+                title="Select VRM Model",
+                filetypes=[("VRM files", "*.vrm"), ("GLB files", "*.glb"), ("All files", "*.*")]
+            )
+            root.destroy()
+            if path:
+                self._load_vrm(path)
 
     def _tick_fps(self):
         self._fps_count += 1
@@ -136,6 +176,11 @@ class VTuberApp:
                     self.renderer.update_blendshapes(smoothed_face)
                     self.renderer.update_pose(smoothed_bones)
 
+                # --- render 3D avatar ---
+                self.renderer.render()
+                if self.renderer.should_close:
+                    self.gui.set_running(False)
+
                 # --- draw preview frame ---
                 frame = self.capture.get_frame()
                 if frame is not None:
@@ -157,6 +202,10 @@ class VTuberApp:
                 key = cv2.waitKey(1) & 0xFF
                 if key == ord('q') or key == 27:
                     self.gui.set_running(False)
+                elif key == ord('o'):
+                    self._open_vrm_dialog()
+                elif key == ord('c'):
+                    self._calibrate()
 
         except KeyboardInterrupt:
             print("[App] Interrupted")

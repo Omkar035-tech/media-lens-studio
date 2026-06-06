@@ -68,11 +68,17 @@ class BlendshapeMapper:
 
 
 class BoneMapper:
+    def __init__(self):
+        self.neutral_pose: Dict[str, list] = {}
+        
     def _vec(self, p1, p2) -> np.ndarray:
-        return np.array([p2.x - p1.x, p2.y - p1.y, p2.z - p1.z], dtype=np.float64)
+        # MediaPipe: X right, Y down, Z forward from camera
+        # VRM/OpenGL: X right, Y up, Z forward (towards camera)
+        # We negate Y to match OpenGL Y-up
+        return np.array([p2.x - p1.x, -(p2.y - p1.y), p2.z - p1.z], dtype=np.float64)
 
-    def _v2q(self, target, source=(0.0, -1.0, 0.0)):
-        # explicit float64 dtype fixes the numpy casting error
+    def _v2q(self, target, source=(0.0, 1.0, 0.0)):
+        """Calculate rotation from source vector to target vector."""
         t = np.array(target, dtype=np.float64)
         s = np.array(source, dtype=np.float64)
 
@@ -84,16 +90,32 @@ class BoneMapper:
         t /= tn
         s /= sn
 
+        # Dot product to find angle
+        dot = np.clip(np.dot(s, t), -1.0, 1.0)
+        angle = np.arccos(dot)
+        
+        # Cross product for axis
         ax = np.cross(s, t)
         ax_norm = np.linalg.norm(ax)
+        
         if ax_norm < 1e-6:
+            # Parallel or anti-parallel
+            if dot < -0.99:
+                # Anti-parallel: find an orthogonal axis
+                ax = np.array([1, 0, 0]) if abs(s[0]) < 0.9 else np.array([0, 1, 0])
+                ax = np.cross(s, ax)
+                return R.from_rotvec(ax * np.pi).as_quat().tolist()
             return [0.0, 0.0, 0.0, 1.0]
 
         ax /= ax_norm
-        angle = np.arccos(np.clip(np.dot(s, t), -1.0, 1.0))
         return R.from_rotvec(ax * angle).as_quat().tolist()
 
-    def map_pose(self, pose_landmarks_list) -> Dict[str, Any]:
+    def set_neutral(self, pose_landmarks_list):
+        if not pose_landmarks_list: return
+        self.neutral_pose = self.map_pose(pose_landmarks_list, calibrated=False)
+        print("[BoneMapper] Neutral pose calibrated")
+
+    def map_pose(self, pose_landmarks_list, calibrated=True) -> Dict[str, Any]:
         if not pose_landmarks_list:
             return {}
 
@@ -103,21 +125,46 @@ class BoneMapper:
 
         rots = {}
 
-        # Only map bones where both landmarks are visible enough
-        def vis(i): return getattr(lms[i], 'visibility', 1.0) > 0.4
+        def vis(i): return getattr(lms[i], 'visibility', 1.0) > 0.5
 
-        if vis(11) and vis(13):
-            rots["leftUpperArm"]  = self._v2q(self._vec(lms[11], lms[13]))
-        if vis(12) and vis(14):
-            rots["rightUpperArm"] = self._v2q(self._vec(lms[12], lms[14]))
-
+        # --- Spine & Hips ---
         if vis(11) and vis(12) and vis(23) and vis(24):
-            sh_mid = np.array([(lms[11].x+lms[12].x)/2,
-                               (lms[11].y+lms[12].y)/2,
-                               (lms[11].z+lms[12].z)/2], dtype=np.float64)
-            hp_mid = np.array([(lms[23].x+lms[24].x)/2,
-                               (lms[23].y+lms[24].y)/2,
-                               (lms[23].z+lms[24].z)/2], dtype=np.float64)
+            sh_mid = np.array([(lms[11].x+lms[12].x)/2, -(lms[11].y+lms[12].y)/2, (lms[11].z+lms[12].z)/2])
+            hp_mid = np.array([(lms[23].x+lms[24].x)/2, -(lms[23].y+lms[24].y)/2, (lms[23].z+lms[24].z)/2])
             rots["spine"] = self._v2q(sh_mid - hp_mid, (0.0, 1.0, 0.0))
+
+        # --- Arms ---
+        # Left Arm (MediaPipe 11->13->15)
+        if vis(11) and vis(13):
+            # VRM Left arm rest pose is usually along +X or -X. 
+            # We map the vector from shoulder to elbow.
+            rots["leftUpperArm"] = self._v2q(self._vec(lms[11], lms[13]), (-1.0, 0.0, 0.0))
+        if vis(13) and vis(15):
+            rots["leftLowerArm"] = self._v2q(self._vec(lms[13], lms[15]), (-1.0, 0.0, 0.0))
+
+        # Right Arm (MediaPipe 12->14->16)
+        if vis(12) and vis(14):
+            rots["rightUpperArm"] = self._v2q(self._vec(lms[12], lms[14]), (1.0, 0.0, 0.0))
+        if vis(14) and vis(16):
+            rots["rightLowerArm"] = self._v2q(self._vec(lms[14], lms[16]), (1.0, 0.0, 0.0))
+
+        # --- Head & Neck ---
+        # Using face landmarks for more accurate head pose if available, 
+        # but here we use pose landmarks 7,8 (ears) or 0 (nose)
+        if vis(7) and vis(8) and vis(0):
+            ear_mid = np.array([(lms[7].x+lms[8].x)/2, -(lms[7].y+lms[8].y)/2, (lms[7].z+lms[8].z)/2])
+            nose = np.array([lms[0].x, -lms[0].y, lms[0].z])
+            # Look direction
+            look_vec = nose - ear_mid
+            rots["head"] = self._v2q(look_vec, (0.0, 0.0, 1.0))
+
+        # Apply calibration offset
+        if calibrated and self.neutral_pose:
+            for key in rots:
+                if key in self.neutral_pose:
+                    q_now = R.from_quat(rots[key])
+                    q_neu = R.from_quat(self.neutral_pose[key])
+                    # result = current * inv(neutral)
+                    rots[key] = (q_now * q_neu.inv()).as_quat().tolist()
 
         return rots
