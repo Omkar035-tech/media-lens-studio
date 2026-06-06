@@ -1,0 +1,8 @@
+mediapipe
+opencv-python
+pygltflib
+PyOpenGL
+PyOpenGL-accelerate
+scipy
+numpy
+dearpygui
