@@ -889,6 +889,16 @@ class VRMRenderer:
                 ni = self.bone_node_map[name]
                 self.nodes[ni].rotation = glm.quat(q[3], q[0], q[1], q[2])
 
+    def get_rest_poses(self) -> Dict[str, List[float]]:
+        rest_poses = {}
+        for bone_name, node_idx in self.bone_node_map.items():
+            if node_idx < len(self.nodes):
+                node = self.nodes[node_idx]
+                # glm.quat is (w, x, y, z), we return [x, y, z, w]
+                q = node.rotation
+                rest_poses[bone_name] = [q.x, q.y, q.z, q.w]
+        return rest_poses
+
     def _compute_matrices(self):
         def up(idx, pm):
             n  = self.nodes[idx]

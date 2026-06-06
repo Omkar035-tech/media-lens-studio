@@ -32,8 +32,9 @@ def download_model(url, path):
 
 @dataclass
 class TrackingResult:
-    face_landmarks: Any = None  # list of landmarks (new API: already unwrapped to face[0])
-    pose_landmarks: Any = None  # list of landmarks (new API: already unwrapped to pose[0])
+    face_landmarks: Any = None
+    pose_landmarks: Any = None
+    pose_world_landmarks: Any = None
     blendshapes:    Any = None
     timestamp:    float = 0.0
 
@@ -104,7 +105,8 @@ class TrackingEngine(threading.Thread):
 
                 if self.pose_landmarker:
                     pose_res = self.pose_landmarker.detect_for_video(mp_image, t_ms)
-                    result.pose_landmarks = pose_res.pose_landmarks  # full list
+                    result.pose_landmarks = pose_res.pose_landmarks
+                    result.pose_world_landmarks = pose_res.pose_world_landmarks
 
                 try:
                     if self.output_queue.full():

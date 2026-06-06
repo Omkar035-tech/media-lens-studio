@@ -91,6 +91,9 @@ class VTuberApp:
     def _load_vrm(self, path):
         print(f"[App] Loading VRM: {path}")
         self.renderer.load_vrm(path)
+        # Store rest poses in bone mapper
+        rest_poses = self.renderer.get_rest_poses()
+        self.bone_mapper.set_rest_poses(rest_poses)
 
     def _load_fbx(self, path):
         print(f"[App] FBX import queued: {path}")
@@ -98,7 +101,11 @@ class VTuberApp:
     def _calibrate(self):
         if self._latest_result:
             print("[App] Calibrating neutral pose...")
-            self.bone_mapper.set_neutral(self._latest_result.pose_landmarks)
+            frame = self.capture.get_frame()
+            h, w = (480, 640)
+            if frame is not None:
+                h, w = frame.shape[:2]
+            self.bone_mapper.calibrate(self._latest_result, w, h)
         else:
             print("[App] Calibration failed: No tracking result yet")
 
@@ -160,21 +167,18 @@ class VTuberApp:
                 result = self.tracking.get_result()
                 if result is not None:
                     self._latest_result = result
+                    
+                    frame = self.capture.get_frame()
+                    h, w = (480, 640)
+                    if frame is not None:
+                        h, w = frame.shape[:2]
 
-                    face_weights  = self.blend_mapper.map_face(result.face_landmarks)
-                    bone_rotations = self.bone_mapper.map_pose(result.pose_landmarks)
+                    face_weights  = self.blend_mapper.map(result.face_landmarks, t_now)
+                    smoothed_bones = self.bone_mapper.map_all(result, w, h, t_now)
 
-                    for key in self._face_filter_keys:
-                        val = face_weights.get(key, 0.0)
-                        smoothed_face[key] = self.face_filters[key].update(val, t_now)
-
-                    for key, quat in bone_rotations.items():
-                        if key not in self.bone_filters:
-                            self.bone_filters[key] = MultiOneEuroFilter(4)
-                        smoothed_bones[key] = self.bone_filters[key](quat, t_now)
-
-                    self.renderer.update_blendshapes(smoothed_face)
+                    self.renderer.update_blendshapes(face_weights)
                     self.renderer.update_pose(smoothed_bones)
+                    smoothed_face = face_weights
 
                 # --- render 3D avatar ---
                 self.renderer.render()
