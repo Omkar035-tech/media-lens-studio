@@ -9,6 +9,7 @@ from .smoothing import OneEuroFilter, MultiOneEuroFilter
 from .renderer import VRMRenderer
 from .gui import VTuberGUI
 from .virtual_cam import VirtualCameraOutput
+from .fbx_support import FBXSupport
 
 # Landmark indices for drawing
 FACE_OVAL  = [10,338,297,332,284,251,389,356,454,323,361,288,397,365,379,378,400,377,152,148,176,149,150,136,172,58,132,93,234,127,162,21,54,103,67,109]
@@ -53,6 +54,9 @@ def draw_hud(frame, blendshapes, fps):
     cv2.putText(frame, "Press 'O' to load VRM model", (10, y),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1, cv2.LINE_AA)
     y += 24
+    cv2.putText(frame, "Press 'B' to open Bone Mapper", (10, y),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1, cv2.LINE_AA)
+    y += 24
     cv2.putText(frame, "Press 'C' to calibrate neutral pose", (10, y),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1, cv2.LINE_AA)
     y += 24
@@ -72,6 +76,7 @@ class VTuberApp:
         self.bone_mapper  = BoneMapper()
         self.renderer     = VRMRenderer()
         self.v_cam        = VirtualCameraOutput()
+        self.fbx          = FBXSupport()
         self.gui          = VTuberGUI(
             on_import_vrm=self._load_vrm,
             on_import_fbx=self._load_fbx,
@@ -94,9 +99,20 @@ class VTuberApp:
         # Store rest poses in bone mapper
         rest_poses = self.renderer.get_rest_poses()
         self.bone_mapper.set_rest_poses(rest_poses)
+        # Populate bone mapper UI
+        cam_bones = ["head", "neck", "spine", "chest", 
+                     "leftUpperArm", "leftLowerArm", "rightUpperArm", "rightLowerArm"]
+        model_bones = list(self.renderer.bone_node_map.keys())
+        self.gui.bone_mapper_ui.set_camera_bones(cam_bones)
+        self.gui.bone_mapper_ui.set_model_bones(model_bones)
 
     def _load_fbx(self, path):
-        print(f"[App] FBX import queued: {path}")
+        print(f"[App] Loading FBX: {path}")
+        self.fbx.load_fbx(path)
+        cam_bones = ["head", "neck", "spine", "chest", 
+                     "leftUpperArm", "leftLowerArm", "rightUpperArm", "rightLowerArm"]
+        self.gui.bone_mapper_ui.set_camera_bones(cam_bones)
+        self.gui.bone_mapper_ui.set_model_bones(self.fbx.get_bone_names())
 
     def _calibrate(self):
         if self._latest_result:
@@ -173,15 +189,32 @@ class VTuberApp:
                     if frame is not None:
                         h, w = frame.shape[:2]
 
-                    face_weights  = self.blend_mapper.map(result.face_landmarks, t_now)
-                    smoothed_bones = self.bone_mapper.map_all(result, w, h, t_now)
+                    face_weights = self.blend_mapper.map(result.face_landmarks, t_now)
+                    
+                    # New unified mapping logic
+                    deltas = {}
+                    if result.face_landmarks:
+                        deltas.update(self.bone_mapper.head_estimator.estimate(result.face_landmarks, w, h))
+                    if result.pose_world_landmarks:
+                        deltas.update(self.bone_mapper.body_solver.solve(result.pose_world_landmarks))
 
+                    # Apply node mapper: cam bone -> model bone with gain
+                    mapped = self.gui.bone_mapper_ui.get_mapped_rotations(deltas)
+                    
+                    # Apply to VRM via BoneApplicator
+                    final_bones = self.bone_mapper.bone_applicator.apply(mapped, t_now)
                     self.renderer.update_blendshapes(face_weights)
-                    self.renderer.update_pose(smoothed_bones)
+                    self.renderer.update_pose(final_bones)
+                    
+                    # Also apply to FBX if loaded
+                    if self.fbx.scene:
+                        self.fbx.apply_rotations(mapped)
+                    
                     smoothed_face = face_weights
 
                 # --- render 3D avatar ---
                 self.renderer.render()
+                self.gui.render_frame()
                 if self.renderer.should_close:
                     self.gui.set_running(False)
 
@@ -208,6 +241,8 @@ class VTuberApp:
                     self.gui.set_running(False)
                 elif key == ord('o'):
                     self._open_vrm_dialog()
+                elif key == ord('b'):
+                    self.gui.open_bone_mapper()
                 elif key == ord('c'):
                     self._calibrate()
 

@@ -129,7 +129,8 @@
 #         self.active_blendshapes: Dict[str, float] = {}
 #         self.should_close = False
 #         self._binary_blob_cache: Optional[bytes] = None
-        
+#         self._frame = 0
+#         
 #         self._init_glfw()
 #         self.shader = Shader(VERTEX_SHADER, FRAGMENT_SHADER)
 #         self.resize(640, 480)
@@ -888,6 +889,9 @@ class VRMRenderer:
             if name in self.bone_node_map:
                 ni = self.bone_node_map[name]
                 self.nodes[ni].rotation = glm.quat(q[3], q[0], q[1], q[2])
+            else:
+                if self._frame <= 5:
+                    print(f"[Renderer] WARN: bone '{name}' not in bone_node_map. Available: {list(self.bone_node_map.keys())[:8]}")
 
     def get_rest_poses(self) -> Dict[str, List[float]]:
         rest_poses = {}

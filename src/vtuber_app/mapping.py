@@ -50,7 +50,7 @@ class HeadPoseEstimator:
             return R_mat
         return None
 
-    def estimate(self, face_landmarks, img_w, img_h) -> Dict[str, List[float]]:
+    def estimate(self, face_landmarks, img_w, img_h, head_gain=1.0) -> Dict[str, List[float]]:
         if not face_landmarks: return {}
         
         R_current = self._estimate_absolute_matrix(face_landmarks[0], img_w, img_h)
@@ -61,7 +61,7 @@ class HeadPoseEstimator:
         
         # Apply 40% to neck, 60% to head
         # Use rotvec for proportional rotation (equivalent to slerp from identity)
-        rot_vec = rot.as_rotvec()
+        rot_vec = rot.as_rotvec() * head_gain
         neck_rot = R.from_rotvec(rot_vec * 0.4).as_quat().tolist()
         head_rot = R.from_rotvec(rot_vec * 0.6).as_quat().tolist()
         
